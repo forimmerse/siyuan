@@ -109,7 +109,7 @@ jobs:
           echo "$GOPATH/bin" >> $GITHUB_PATH
 
       - name: Init gomobile
-        run: "$GOPATH/bin/gomobile" init
+        run: gomobile init
 
       - name: Build Android Kernel
         run: gomobile bind -tags "fts5 sqlcipher" -ldflags "-s -w" -v -o kernel.aar -target android/arm64 -androidapi 26 ./mobile/
