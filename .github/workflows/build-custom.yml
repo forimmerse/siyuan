@@ -1,0 +1,182 @@
+name: Build Custom (Linux x64 + Android arm64)
+
+on:
+  workflow_dispatch:
+
+env:
+  package_json: "app/package.json"
+  GOMODCACHE: ${{ github.workspace }}/go/pkg/mod
+
+jobs:
+  prepare:
+    name: Prepare
+    runs-on: ubuntu-24.04
+    outputs:
+      packageManager: ${{ steps.packageManager.outputs.value }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Extract packageManager from package.json
+        id: packageManager
+        run: echo "value=$(jq .packageManager ${{ env.package_json }} -r)" >> $GITHUB_OUTPUT
+
+  build_linux:
+    name: Linux x64 AppImage
+    needs: prepare
+    uses: ./.github/workflows/desktop-build.yml
+    with:
+      config: >-
+        {"os":"ubuntu-24.04","name":"ubuntu build linux","kernel_path":"../app/kernel-linux/SiYuan-Kernel","build_args_prefix":"-s -w -X","build_args_suffix":"Mode=prod","electron_args":"dist-linux","goos":"linux","goarch":"amd64","suffix":"linux","e2e_shards":""}
+      packageManager: ${{ needs.prepare.outputs.packageManager }}
+
+  build_android:
+    name: Android arm64 APK
+    runs-on: ubuntu-24.04
+    needs: prepare
+    env:
+      GOPATH: ${{ github.workspace }}/go
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: ${{ github.workspace }}/go/src/github.com/${{ github.repository }}
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: ${{ github.workspace }}/go/src/github.com/${{ github.repository }}/kernel/go.mod
+          cache: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Prepare Go cache
+        id: go-cache
+        run: node scripts/go-cache.mjs
+        working-directory: ${{ github.workspace }}/go/src/github.com/${{ github.repository }}
+
+      - name: Restore Go cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ${{ steps.go-cache.outputs.modules }}
+            ${{ steps.go-cache.outputs.build }}
+          key: ${{ steps.go-cache.outputs.key }}
+
+      - name: Install Node pnpm
+        run: npm install --global --allow-scripts=pnpm ${{ needs.prepare.outputs.packageManager }}
+        working-directory: ${{ github.workspace }}/go/src/github.com/${{ github.repository }}/app
+
+      - name: Get pnpm store path
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+        working-directory: ${{ github.workspace }}/go/src/github.com/${{ github.repository }}/app
+
+      - name: Restore pnpm store
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-v2-${{ runner.os }}-${{ runner.arch }}-${{ needs.prepare.outputs.packageManager }}-${{ hashFiles(format('go/src/github.com/{0}/app/pnpm-lock.yaml', github.repository)) }}
+          restore-keys: pnpm-v2-${{ runner.os }}-${{ runner.arch }}-${{ needs.prepare.outputs.packageManager }}-
+
+      - name: Install Node Dependencies
+        run: pnpm install --no-frozen-lockfile
+        working-directory: ${{ github.workspace }}/go/src/github.com/${{ github.repository }}/app
+
+      - name: Build UI
+        run: pnpm run build
+        working-directory: ${{ github.workspace }}/go/src/github.com/${{ github.repository }}/app
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Android NDK
+        run: |
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER=$(ls "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -1)
+          fi
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" "ndk;28.2.13676358" > /dev/null
+          NDK_DIR="$ANDROID_HOME/ndk/28.2.13676358"
+          echo "ANDROID_NDK_HOME=$NDK_DIR" >> $GITHUB_ENV
+          echo "ANDROID_NDK_ROOT=$NDK_DIR" >> $GITHUB_ENV
+
+      - name: Set up gomobile
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@2553ed8ce294
+          echo "$GOPATH/bin" >> $GITHUB_PATH
+
+      - name: Init gomobile
+        run: "$GOPATH/bin/gomobile" init
+
+      - name: Build Android Kernel
+        run: gomobile bind -tags "fts5 sqlcipher" -ldflags "-s -w" -v -o kernel.aar -target android/arm64 -androidapi 26 ./mobile/
+        working-directory: ${{ github.workspace }}/go/src/github.com/${{ github.repository }}/kernel
+        env:
+          CGO_ENABLED: 1
+          JAVA_TOOL_OPTIONS: -Dfile.encoding=UTF-8
+
+      - name: Get siyuan-android
+        uses: actions/checkout@v7
+        with:
+          repository: siyuan-note/siyuan-android
+          path: ${{ github.workspace }}/siyuan-android
+
+      - name: Patch siyuan-android Repositories
+        run: sed -i '/maven.aliyun.com/d' build.gradle
+        working-directory: ${{ github.workspace }}/siyuan-android
+
+      - name: Prepare Android Build Inputs
+        run: |
+          mkdir -p ${{ github.workspace }}/siyuan-android/app/libs
+          cp ${{ github.workspace }}/go/src/github.com/${{ github.repository }}/kernel/kernel.aar \
+             ${{ github.workspace }}/siyuan-android/app/libs/kernel.aar
+          cd ${{ github.workspace }}/go/src/github.com/${{ github.repository }}/app
+          node scripts/trimChangelogs.js
+          python3 ../scripts/prepare-ocr.py
+          zip -r app.zip appearance guide stage $([ -d changelogs ] && echo changelogs) -x 'stage/ocr/runtime/*'
+          zip -j app.zip ../LICENSE ../THIRD_PARTY_NOTICES.md
+          mkdir -p ${{ github.workspace }}/siyuan-android/app/src/main/assets
+          cp app.zip ${{ github.workspace }}/siyuan-android/app/src/main/assets/app.zip
+
+      - name: Inject Signing Config
+        run: |
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > ${{ github.workspace }}/siyuan-android/app/siyuan-android.jks
+          cat > ${{ github.workspace }}/siyuan-android/signings.gradle <<EOF
+          android {
+            signingConfigs {
+              siyuanConfig {
+                storeFile file("siyuan-android.jks")
+                storePassword "$ANDROID_KEYSTORE_PASSWORD"
+                keyAlias "$ANDROID_KEY_ALIAS"
+                keyPassword "$ANDROID_KEY_PASSWORD"
+              }
+            }
+          }
+          EOF
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+
+      - name: Build Android App
+        run: |
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          chmod +x ./gradlew
+          if [ -f scripts/verify-build.gradle ]; then
+            ./gradlew --init-script scripts/verify-build.gradle :app:verifyBuildConfiguration
+          fi
+          ./gradlew assembleOfficialRelease
+          VERSION=$(jq -r .version ${{ github.workspace }}/go/src/github.com/${{ github.repository }}/${{ env.package_json }})
+          cd app/build/outputs/apk/official/release
+          mv siyuan-*-official-release.apk siyuan-${VERSION}-android-arm64.apk
+        working-directory: ${{ github.workspace }}/siyuan-android
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: siyuan-android-arm64
+          path: ${{ github.workspace }}/siyuan-android/app/build/outputs/apk/official/release/siyuan-*-android-arm64.apk

@@ -475,17 +475,9 @@ func checkSync(boot, exit, byHand bool) bool {
 		return false
 	}
 
-	switch confSyncReadSnapshot.Provider {
-	case conf.ProviderSiYuan:
-		if !IsSubscriber() {
-			UpdateSyncConf(func(s *conf.Sync) { s.Enabled = false })
-			return false
-		}
-	case conf.ProviderWebDAV, conf.ProviderS3, conf.ProviderLocal:
-		if !IsPaidUser() {
-			UpdateSyncConf(func(s *conf.Sync) { s.Enabled = false })
-			return false
-		}
+	if confSyncReadSnapshot.Provider == conf.ProviderSiYuan && !IsSubscriber() {
+		UpdateSyncConf(func(s *conf.Sync) { s.Enabled = false })
+		return false
 	}
 
 	if !byHand && !exit && notifyAutoSyncPaused() {
