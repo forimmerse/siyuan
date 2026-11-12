@@ -1,0 +1,92 @@
+name: Sync Upstream & Build
+
+on:
+  schedule:
+    - cron: '0 2 * * *'  # 每天 UTC 02:00（北京时间 10:00）
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+  issues: write
+
+jobs:
+  sync:
+    name: Sync from upstream
+    runs-on: ubuntu-24.04
+    outputs:
+      updated: ${{ steps.merge.outputs.updated }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/siyuan-note/siyuan.git
+          git fetch upstream master
+
+      - name: Check if behind upstream
+        id: check
+        run: |
+          BEHIND=$(git rev-list HEAD..upstream/master --count)
+          echo "behind=$BEHIND" >> $GITHUB_OUTPUT
+          echo "Commits behind upstream: $BEHIND"
+
+      - name: Merge upstream
+        id: merge
+        if: steps.check.outputs.behind != '0'
+        run: |
+          git merge upstream/master --no-edit
+          echo "updated=true" >> $GITHUB_OUTPUT
+
+      - name: Push
+        if: steps.merge.outputs.updated == 'true'
+        run: git push origin master
+
+      - name: Open issue on conflict
+        if: failure() && steps.check.outputs.behind != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          UPSTREAM_SHA=$(git rev-parse upstream/master)
+          gh issue create \
+            --title "Upstream merge conflict — manual resolution needed" \
+            --body "上游 [siyuan-note/siyuan](https://github.com/siyuan-note/siyuan) 有新更新，自动合并失败，请手动处理。
+
+          **上游最新 commit:** \`${UPSTREAM_SHA}\`
+
+          **解决步骤：**
+          \`\`\`bash
+          git fetch upstream
+          git merge upstream/master
+          # 解决冲突（通常只在 kernel/model/sync.go 或 app/src/util/needSubscribe.ts）
+          git add .
+          git commit
+          git push
+          \`\`\`
+          " \
+            --label "merge-conflict" 2>/dev/null || \
+          gh issue create \
+            --title "Upstream merge conflict — manual resolution needed" \
+            --body "上游有新更新，自动合并失败，请手动处理合并冲突后推送。上游最新 commit: ${UPSTREAM_SHA}"
+
+  build:
+    name: Trigger build
+    needs: sync
+    if: needs.sync.outputs.updated == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Trigger build-custom workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run build-custom.yml \
+            --repo ${{ github.repository }} \
+            --ref master
