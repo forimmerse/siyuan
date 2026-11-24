@@ -58,6 +58,7 @@ jobs:
         run: |
           UPSTREAM_SHA=$(git rev-parse upstream/master)
           gh issue create \
+            --repo ${{ github.repository }} \
             --title "Upstream merge conflict — manual resolution needed" \
             --body "上游 [siyuan-note/siyuan](https://github.com/siyuan-note/siyuan) 有新更新，自动合并失败，请手动处理。
 
@@ -75,6 +76,7 @@ jobs:
           " \
             --label "merge-conflict" 2>/dev/null || \
           gh issue create \
+            --repo ${{ github.repository }} \
             --title "Upstream merge conflict — manual resolution needed" \
             --body "上游有新更新，自动合并失败，请手动处理合并冲突后推送。上游最新 commit: ${UPSTREAM_SHA}"
 
