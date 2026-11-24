@@ -13,12 +13,17 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       packageManager: ${{ steps.packageManager.outputs.value }}
+      version: ${{ steps.version.outputs.value }}
     steps:
       - uses: actions/checkout@v7
 
       - name: Extract packageManager from package.json
         id: packageManager
         run: echo "value=$(jq .packageManager ${{ env.package_json }} -r)" >> $GITHUB_OUTPUT
+
+      - name: Extract version from package.json
+        id: version
+        run: echo "value=$(jq .version ${{ env.package_json }} -r)" >> $GITHUB_OUTPUT
 
   build_linux:
     name: Linux x64 AppImage
@@ -170,7 +175,7 @@ jobs:
             ./gradlew --init-script scripts/verify-build.gradle :app:verifyBuildConfiguration
           fi
           ./gradlew assembleOfficialRelease
-          VERSION=$(jq -r .version ${{ github.workspace }}/go/src/github.com/${{ github.repository }}/${{ env.package_json }})
+          VERSION="${{ needs.prepare.outputs.version }}"
           cd app/build/outputs/apk/official/release
           mv siyuan-*-official-release.apk siyuan-${VERSION}-android-arm64.apk
         working-directory: ${{ github.workspace }}/siyuan-android
@@ -180,3 +185,27 @@ jobs:
         with:
           name: siyuan-android-arm64
           path: ${{ github.workspace }}/siyuan-android/app/build/outputs/apk/official/release/siyuan-*-android-arm64.apk
+
+  release:
+    name: Create GitHub Release
+    needs: [prepare, build_linux, build_android]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.prepare.outputs.version }}-r${{ github.run_number }}
+          name: SiYuan v${{ needs.prepare.outputs.version }} (Build #${{ github.run_number }})
+          generate_release_notes: true
+          files: |
+            release-assets/**/*.AppImage
+            release-assets/**/*-android-arm64.apk
+          fail_on_unmatched_files: true
