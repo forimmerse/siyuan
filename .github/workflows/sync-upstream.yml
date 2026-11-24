@@ -54,7 +54,7 @@ jobs:
       - name: Open issue on conflict
         if: failure() && steps.check.outputs.behind != '0'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
         run: |
           UPSTREAM_SHA=$(git rev-parse upstream/master)
           gh issue create \
